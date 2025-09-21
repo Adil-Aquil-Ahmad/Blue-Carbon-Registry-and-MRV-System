@@ -115,7 +115,13 @@ class DynamicCarbonCreditCalculator:
                 'monitoring_requirements': credit_distribution.get('monitoring_requirements', []),
                 
                 # Supporting analysis
-                'supporting_analysis': analysis_result,
+                'supporting_analysis': {
+                    **analysis_result,
+                    'vegetation_change_multiplier': analysis_result.get('vegetation_change_multiplier', {}),
+                    'transformation_metrics': analysis_result.get('transformation_metrics', {}),
+                    'co2_sequestration': analysis_result.get('co2_sequestration', {}),
+                    'carbon_credits': analysis_result.get('carbon_credits', {})
+                },
                 'calculation_summary': calculation_summary,
                 
                 # Verification information
@@ -207,6 +213,40 @@ class DynamicCarbonCreditCalculator:
         except Exception as e:
             logger.error(f"Error applying quality adjustments: {e}")
             return base_credits
+    
+    def _validate_and_constrain_credits(self, final_credits: float, project_area_hectares: float, 
+                                      verification_score: Dict) -> float:
+        """
+        Validate and constrain credits within acceptable limits.
+        """
+        try:
+            # Apply minimum credit threshold
+            min_credits = self.settings['min_credits_per_project']
+            validated_credits = max(final_credits, min_credits)
+            
+            # Apply maximum credit per hectare limit
+            max_credits_total = project_area_hectares * self.settings['max_credits_per_hectare']
+            validated_credits = min(validated_credits, max_credits_total)
+            
+            # Apply confidence-based constraints
+            confidence_score = verification_score.get('overall_verification_score', 70)
+            confidence_threshold = self.settings['verification_confidence_threshold']
+            
+            if confidence_score < confidence_threshold:
+                # Reduce credits for low confidence
+                confidence_multiplier = max(0.5, confidence_score / confidence_threshold)
+                validated_credits *= confidence_multiplier
+                logger.info(f"Applied confidence reduction: {confidence_multiplier:.2f}x due to low verification score")
+            
+            # Ensure positive credits
+            validated_credits = max(0, validated_credits)
+            
+            logger.info(f"Credits validated: {final_credits:.2f} -> {validated_credits:.2f}")
+            return validated_credits
+            
+        except Exception as e:
+            logger.error(f"Error validating and constraining credits: {e}")
+            return max(0, final_credits)  # Return non-negative fallback
     
     def _apply_project_bonuses(self, credits: float, transformation_metrics: Dict,
                              project_area_hectares: float, project_metadata: Optional[Dict]) -> float:

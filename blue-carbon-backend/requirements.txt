@@ -6,23 +6,32 @@ uvicorn[standard]==0.24.0
 
 # Database
 sqlalchemy==2.0.23
-sqlite3  # Built into Python
+# sqlite3 - Built into Python
 
 # Authentication & Security
 pyjwt==2.8.0
 python-multipart==0.0.6
+passlib==1.7.4
+bcrypt==4.0.1
 
 # Blockchain Integration
 web3==6.11.3
 hexbytes==0.3.1
 
+# Computer Vision & Image Processing
+opencv-python==4.8.1.78
+numpy==1.25.2
+Pillow==10.1.0
+
 # File Handling & Utilities
-python-multipart==0.0.6
 aiofiles==23.2.1
+
+# HTTP Client for Testing
+requests==2.31.0
 
 # Email Functionality (Built into Python)
 # smtplib - Built into Python
-# email - Built into Python
+# email - Built into Python  
 # ssl - Built into Python
 
 # Development & Testing
@@ -55,12 +64,28 @@ typing-extensions==4.8.0
 # secrets - Built into Python
 # hashlib - Built into Python
 
+# Logging
+# logging - Built into Python
+
 # Installation Instructions:
 # 1. Navigate to the blue-carbon-backend directory
-# 2. Activate your virtual environment (if using one)
-# 3. Run: pip install -r requirements.txt
-# 4. For email functionality, no additional packages needed (uses built-in Python libraries)
+# 2. Create a virtual environment: python -m venv venv
+# 3. Activate your virtual environment:
+#    - Windows: venv\Scripts\activate
+#    - Linux/Mac: source venv/bin/activate
+# 4. Run: pip install -r requirements.txt
+# 5. For email functionality, no additional packages needed (uses built-in Python libraries)
 
-# Note: If you encounter issues with web3 installation, you may need:
+# Note: If you encounter issues with OpenCV installation on Windows:
 # pip install --upgrade setuptools wheel
+# pip install opencv-python==4.8.1.78
+
+# Note: If you encounter issues with web3 installation:
+# pip install --upgrade setuptools wheel  
 # pip install web3==6.11.3
+
+# AI/ML Package Notes:
+# - opencv-python: Computer vision for image analysis
+# - numpy: Numerical computing for image processing
+# - Pillow: Python Imaging Library for image manipulation
+# - These are required for the AI verification system and greenness analysis

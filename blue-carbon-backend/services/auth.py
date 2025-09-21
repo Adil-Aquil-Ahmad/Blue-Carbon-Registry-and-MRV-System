@@ -144,6 +144,6 @@ class AuthService:
                 )
                 db.add(admin_user)
                 db.commit()
-                print("✅ Default admin user created: admin/admin123")
+                print("SUCCESS: Default admin user created: admin/admin123")
         finally:
             db.close()

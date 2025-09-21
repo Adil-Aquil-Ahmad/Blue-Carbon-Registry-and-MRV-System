@@ -8,6 +8,7 @@ from hexbytes import HexBytes
 from web3 import Web3
 import json
 import os
+import numpy as np
 import hashlib
 import logging
 
@@ -15,9 +16,29 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Function to convert numpy types to Python native types
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if obj is None:
+        return None
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    else:
+        return obj
+
 # ⬇️ DB + MRV integration
 from database import SessionLocal
-from models.db_model import MRVData
+from models.db_model import MRVData, ProjectData
 from models.auth_model import User, UserRole
 from services.mrv import upload_field_data
 from services.auth import AuthService
@@ -104,6 +125,10 @@ class MintRequest(BaseModel):
     project_id: int
     amount: int
 
+class RejectRequest(BaseModel):
+    evidence_id: int
+    reason: str = "Evidence rejected by administrator"
+
 # ---------------- Auth Models ----------------
 class LoginRequest(BaseModel):
     username: str
@@ -139,6 +164,23 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     
     return user
 
+def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[User]:
+    """Get current authenticated user from JWT token, returns None if not authenticated"""
+    if credentials is None:
+        return None
+    
+    try:
+        token = credentials.credentials
+        payload = AuthService.verify_token(token)
+        
+        if payload is None:
+            return None
+        
+        user = AuthService.get_user_by_id(payload["user_id"])
+        return user
+    except Exception:
+        return None
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     """Require admin role"""
     if current_user.role != UserRole.ADMIN:
@@ -153,6 +195,13 @@ def to_checksum(address: str) -> str:
         raise HTTPException(status_code=400, detail=f"Invalid Ethereum address: {address}")
 
 def clean(o: Any):
+    # Handle numpy types first
+    if hasattr(o, 'dtype'):  # numpy arrays and scalars have dtype attribute
+        if hasattr(o, 'item'):  # numpy scalars
+            return o.item()  # Convert to native Python type
+        else:  # numpy arrays
+            return o.tolist()  # Convert to Python list
+    
     if isinstance(o, HexBytes): return o.hex()
     if isinstance(o, bytes): return "0x" + o.hex()
     if isinstance(o, (list, tuple)): return [clean(x) for x in o]
@@ -326,29 +375,30 @@ def get_all_users(current_user: User = Depends(require_admin)):
 # ---------------- Existing Routes ----------------
 
 @app.get("/projects/my")
-def get_my_projects(current_user: User = Depends(get_current_user)):
+def get_my_projects(current_user: Optional[User] = Depends(get_current_user_optional)):
     """Get projects owned by the current user with full details"""
-    try:
-        total = registry.functions.totalProjects().call()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read totalProjects: {e}")
-
-    projects = []
-    # Use the specific wallet address for filtering
-    target_wallet = "0xa114791A6a939087048960f48e62fbe817828CD1"
+    # If not authenticated, return empty array
+    if current_user is None:
+        return clean([])
     
-    for i in range(1, total + 1):
-        try:
-            p = registry.functions.projects(i).call()
-        except Exception:
-            continue
-
-        # Only include projects owned by the specific wallet address
-        if p[3].lower() == target_wallet.lower():
-            # fetch evidences from DB for this project
-            db = SessionLocal()
-            rows = db.query(MRVData).filter(MRVData.project_id == i).all()
-            db.close()
+    # If user doesn't have a wallet address, return empty array
+    if not hasattr(current_user, 'wallet_address') or not current_user.wallet_address:
+        return clean([])
+    
+    try:
+        db = SessionLocal()
+        # Get projects from database for immediate availability
+        user_projects = db.query(ProjectData).filter(
+            ProjectData.owner == current_user.wallet_address
+        ).all()
+        
+        projects = []
+        for project in user_projects:
+            # Get evidence for this project
+            evidences_query = db.query(MRVData).filter(
+                MRVData.project_id == (project.blockchain_id or project.id)
+            ).all()
+            
             evidences = [
                 {
                     "evidenceId": r.id,
@@ -358,23 +408,33 @@ def get_my_projects(current_user: User = Depends(get_current_user)):
                     "co2": r.co2,
                     "mediaHashes": r.media_hashes,
                     "evidenceHash": r.evidence_hash,
-                    "timestamp": r.timestamp.isoformat()
-                } for r in rows
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                    "verified": r.verified,
+                    "calculated_carbon_credits": r.calculated_carbon_credits,
+                    "credit_calculation_method": r.credit_calculation_method
+                } for r in evidences_query
             ]
-
+            
             projects.append({
-                "id": i,
-                "name": p[0],
-                "location": p[1],
-                "hectares": p[2],
-                "owner": p[3],
-                "metadata": p[4],
-                "exists": p[5],
-                "totalIssuedCredits": p[6],
-                "evidences": evidences
+                "id": project.blockchain_id or project.id,
+                "name": project.name,
+                "location": project.location,
+                "hectares": project.hectares,
+                "owner": project.owner,
+                "metadata": project.project_metadata,
+                "exists": True,
+                "totalIssuedCredits": project.total_issued_credits,
+                "evidences": evidences,
+                "verified_on_blockchain": project.verified_on_blockchain,
+                "created_at": project.created_at.isoformat() if project.created_at else None
             })
-
-    return clean(projects)
+        
+        db.close()
+        return clean(projects)
+        
+    except Exception as e:
+        logger.error(f"Error fetching user projects: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch projects: {e}")
 
 @app.get("/projects/all")
 def get_all_projects_limited(current_user: User = Depends(get_current_user)):
@@ -448,68 +508,123 @@ def get_all_projects_limited(current_user: User = Depends(get_current_user)):
 def get_projects():
     """Legacy endpoint - returns all projects with full details (for backwards compatibility)"""
     try:
-        total = registry.functions.totalProjects().call()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read totalProjects: {e}")
-
-    projects = []
-    for i in range(1, total + 1):
-        try:
-            p = registry.functions.projects(i).call()
-        except Exception:
-            continue
-
-        # fetch evidences from DB for this project
         db = SessionLocal()
-        rows = db.query(MRVData).filter(MRVData.project_id == i).all()
+        all_projects = db.query(ProjectData).all()
+        
+        projects = []
+        for project in all_projects:
+            # Get evidence for this project
+            evidences_query = db.query(MRVData).filter(
+                MRVData.project_id == (project.blockchain_id or project.id)
+            ).all()
+            
+            evidences = [
+                {
+                    "evidenceId": r.id,
+                    "projectId": r.project_id,
+                    "uploader": r.uploader,
+                    "gps": r.gps,
+                    "co2": r.co2,
+                    "mediaHashes": r.media_hashes,
+                    "evidenceHash": r.evidence_hash,
+                    "timestamp": r.timestamp.isoformat() if r.timestamp else None
+                } for r in evidences_query
+            ]
+
+            projects.append({
+                "id": project.blockchain_id or project.id,
+                "name": project.name,
+                "location": project.location,
+                "hectares": project.hectares,
+                "owner": project.owner,
+                "metadata": project.project_metadata,
+                "exists": True,
+                "totalIssuedCredits": project.total_issued_credits,
+                "evidences": evidences
+            })
+        
         db.close()
-        evidences = [
-            {
-                "evidenceId": r.id,
-                "projectId": r.project_id,
-                "uploader": r.uploader,
-                "gps": r.gps,
-                "co2": r.co2,
-                "mediaHashes": r.media_hashes,
-                "evidenceHash": r.evidence_hash,
-                "timestamp": r.timestamp.isoformat()
-            } for r in rows
-        ]
-
-        projects.append({
-            "id": i,
-            "name": p[0],
-            "location": p[1],
-            "hectares": p[2],
-            "owner": p[3],
-            "metadata": p[4],
-            "exists": p[5],
-            "totalIssuedCredits": p[6],
-            "evidences": evidences
-        })
-
-    return clean(projects)
+        return clean(projects)
+        
+    except Exception as e:
+        logger.error(f"Error fetching projects: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch projects: {e}")
 
 @app.post("/projects")
 def register_project(project: Project):
     owner_checksum = to_checksum(project.owner)
+    
+    # First save to database for immediate availability
+    db = SessionLocal()
     try:
-        tx = registry.functions.registerProject(
-            project.name,
-            project.location,
-            project.hectares,
-            owner_checksum,
-            project.metadata
-        ).build_transaction({
-            "from": OWNER,
-            "nonce": w3.eth.get_transaction_count(OWNER),
-            "gas": 2_000_000,
-            "gasPrice": w3.to_wei("20", "gwei")
-        })
-        tx_hash, receipt = sign_and_send(tx)
-        return clean({"status": "ok", "tx_hash": tx_hash, "receipt": receipt})
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to build transaction: {e}")
+        # Create project record in database
+        project_record = ProjectData(
+            name=project.name,
+            location=project.location,
+            hectares=project.hectares,
+            owner=owner_checksum,
+            project_metadata=project.metadata,
+            verified_on_blockchain=False  # Will update after blockchain confirmation
+        )
+        db.add(project_record)
+        db.commit()
+        db.refresh(project_record)
+        local_project_id = project_record.id
+        
+        # Then submit to blockchain
+        try:
+            tx = registry.functions.registerProject(
+                project.name,
+                project.location,
+                project.hectares,
+                owner_checksum,
+                project.metadata
+            ).build_transaction({
+                "from": OWNER,
+                "nonce": w3.eth.get_transaction_count(OWNER),
+                "gas": 2_000_000,
+                "gasPrice": w3.to_wei("20", "gwei")
+            })
+            tx_hash, receipt = sign_and_send(tx)
+            
+            # Update database record with blockchain info
+            project_record.tx_hash = tx_hash
+            project_record.verified_on_blockchain = True
+            
+            # Try to get blockchain project ID from events
+            try:
+                project_events = registry.events.ProjectRegistered().processReceipt(receipt)
+                if project_events:
+                    blockchain_project_id = project_events[0]["args"]["projectId"]
+                    project_record.blockchain_id = blockchain_project_id
+            except Exception as e:
+                logger.warning(f"Could not extract project ID from blockchain events: {e}")
+            
+            db.commit()
+            
+            return clean({
+                "status": "ok", 
+                "tx_hash": tx_hash, 
+                "receipt": receipt,
+                "project_id": local_project_id,
+                "blockchain_id": project_record.blockchain_id
+            })
+        except Exception as blockchain_error:
+            # Blockchain failed, but project is saved locally
+            logger.error(f"Blockchain registration failed: {blockchain_error}")
+            return clean({
+                "status": "partial", 
+                "message": "Project saved locally, blockchain registration failed",
+                "project_id": local_project_id,
+                "error": str(blockchain_error)
+            })
+        
+    except Exception as db_error:
+        db.rollback()
+        logger.error(f"Database error during project registration: {db_error}")
+        raise HTTPException(status_code=500, detail=f"Failed to save project: {db_error}")
+    finally:
+        db.close()
 
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int, current_user: User = Depends(get_current_user)):
@@ -559,7 +674,7 @@ async def upload_evidence(
     project_id: int = Form(...),
     uploader: str = Form(...),
     gps: str = Form(...),
-    co2: float = Form(...),
+    co2: Optional[float] = Form(None),  # Legacy field, now optional since AI calculates CO2
     evidence_type: str = Form("general"),  # "before", "after", "general", "before_after_pair"
     project_area_hectares: Optional[float] = Form(None),
     time_period_years: float = Form(1.0),
@@ -604,7 +719,7 @@ async def upload_evidence(
 
     metadata = json.dumps({
         "gps": gps, 
-        "co2": co2, 
+        "co2": co2 if co2 is not None else 0.0,  # Default to 0.0 for legacy compatibility
         "evidence_type": evidence_type,
         "project_area_hectares": project_area_hectares,
         "time_period_years": time_period_years,
@@ -637,7 +752,7 @@ async def upload_evidence(
             project_id=project_id,
             uploader=uploader,
             gps=gps,
-            co2=str(co2),  # Legacy field
+            co2=str(co2 if co2 is not None else 0.0),  # Legacy field with default
             media_hashes={"files": [os.path.basename(p) for p in saved_files]},
             evidence_hash="0x" + evidence_hash_bytes.hex(),
             verified=False,
@@ -748,7 +863,7 @@ async def estimate_carbon_credits(
             "estimated_credits": 0,
             "co2_sequestration_kg": 0,
             "calculation_method": "baseline",
-            "confidence_level": "medium",
+            "confidence_level": "Medium Confidence (60.0%)",
             "breakdown": {}
         }
         
@@ -778,12 +893,14 @@ async def estimate_carbon_credits(
             }
         })
         
-        # If both images are provided, perform AI analysis
+        # If both images are provided, perform greenness analysis
         if before_image and after_image:
+            logger.info("Starting greenness analysis with both images provided")
             try:
                 # Read image data
                 before_image_data = await before_image.read()
                 after_image_data = await after_image.read()
+                logger.info(f"Images read: before={len(before_image_data)} bytes, after={len(after_image_data)} bytes")
                 
                 # Validate image formats
                 if not before_image.content_type.startswith('image/'):
@@ -791,58 +908,58 @@ async def estimate_carbon_credits(
                 if not after_image.content_type.startswith('image/'):
                     raise HTTPException(status_code=400, detail="After image must be an image file")
                 
-                # Perform AI analysis for more accurate estimation
-                from services.dynamic_carbon_credit_calculator import DynamicCarbonCreditCalculator
-                ai_calculator = DynamicCarbonCreditCalculator()
+                # Perform greenness analysis for multiplier calculation
+                logger.info("Importing and initializing GreennessAnalyzer")
+                from services.greenness_analyzer import GreennessAnalyzer
+                greenness_analyzer = GreennessAnalyzer()
+                logger.info("GreennessAnalyzer initialized successfully")
                 
-                ai_result = ai_calculator.calculate_dynamic_credits(
+                green_analysis = greenness_analyzer.calculate_green_progress_multiplier(
                     before_image_data=before_image_data,
-                    after_image_data=after_image_data,
-                    project_area_hectares=project_area_hectares,
-                    time_period_years=time_period_years,
-                    project_metadata={
-                        "ecosystem_type": ecosystem_type,
-                        "estimation_mode": True
-                    }
+                    after_image_data=after_image_data
                 )
                 
-                if ai_result.get('success'):
-                    # Update response with AI analysis results including provisional credits
-                    response.update({
-                        "estimation_type": "ai_enhanced",
-                        "estimated_credits": ai_result.get('recommended_credits', baseline_credits),
-                        "provisional_credits": ai_result.get('provisional_credits', 0),
-                        "deferred_credits": ai_result.get('deferred_credits', 0),
-                        "co2_sequestration_kg": ai_result.get('supporting_analysis', {}).get('co2_sequestration', {}).get('co2_sequestration_kg', baseline_co2),
-                        "calculation_method": ai_result.get('calculation_method', 'ai_analysis'),
-                        "confidence_level": "high" if ai_result.get('verification_confidence', 0) > 0.8 else "medium",
-                        "credit_distribution": ai_result.get('credit_distribution', {}),
-                        "monitoring_requirements": ai_result.get('monitoring_requirements', []),
-                        "ai_analysis": {
-                            "vegetation_change": ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('vegetation_change_percentage', 0),
-                            "ndvi_improvement": ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('ndvi_improvement', 0),
-                            "transformation_score": ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('transformation_score', 0),
-                            "confidence_score": ai_result.get('verification_confidence', 0),
-                            "summary": ai_result.get('calculation_summary', 'AI analysis completed')
-                        }
-                    })
-                    
-                    # Enhanced breakdown with AI insights and provisional credit info
-                    response["breakdown"].update({
-                        "provisional_system": f"Immediate: {ai_result.get('provisional_credits', 0):.1f} credits, Deferred: {ai_result.get('deferred_credits', 0):.1f} credits",
-                        "ai_vegetation_analysis": f"{ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('vegetation_change_percentage', 0):.1f}% vegetation improvement",
-                        "ndvi_score": f"{ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('ndvi_improvement', 0):.3f} NDVI improvement",
-                        "transformation_quality": ai_result.get('supporting_analysis', {}).get('transformation_metrics', {}).get('quality_assessment', 'moderate')
-                    })
-                else:
-                    # AI analysis failed, add warning but keep baseline calculation
-                    response["warnings"] = [f"AI analysis failed: {ai_result.get('error', 'Unknown error')}"]
-                    response["confidence_level"] = "low"
-            
-            except Exception as ai_error:
-                # AI analysis error, fall back to baseline but notify user
-                response["warnings"] = [f"AI analysis unavailable: {str(ai_error)}"]
-                response["confidence_level"] = "low"
+                # Apply the green progress multiplier to the baseline calculations
+                green_multiplier = green_analysis['green_progress_multiplier']
+                multiplied_credits = baseline_credits * green_multiplier
+                multiplied_co2 = baseline_co2 * green_multiplier
+                
+                # Update response with greenness analysis results
+                response.update({
+                    "estimation_type": "greenness_enhanced",
+                    "estimated_credits": round(multiplied_credits, 2),
+                    "co2_sequestration_kg": round(multiplied_co2, 2),
+                    "calculation_method": "greenness_analysis",
+                    "confidence_level": f"{green_analysis['confidence_level']} Confidence",
+                    "green_progress_multiplier": green_multiplier,
+                    "green_progress_level": green_analysis['green_progress_level'],
+                    "greenness_analysis": {
+                        "before_green_percentage": green_analysis['before_green_percentage'],
+                        "after_green_percentage": green_analysis['after_green_percentage'], 
+                        "green_improvement": green_analysis['green_improvement'],
+                        "multiplier_justification": green_analysis['analysis_details']['justification'],
+                        "confidence": green_analysis['confidence_level']
+                    }
+                })
+                
+                # Enhanced breakdown with greenness analysis
+                response["breakdown"].update({
+                    "green_progress_analysis": f"{green_analysis['green_improvement']:+.1f}% vegetation change",
+                    "green_progress_multiplier": f"{green_multiplier:.2f}x multiplier applied",
+                    "credits_before_multiplier": f"{baseline_credits:.1f} credits (baseline)",
+                    "credits_after_multiplier": f"{multiplied_credits:.1f} credits (after {green_multiplier:.2f}x multiplier)",
+                    "co2_before_multiplier": f"{baseline_co2:.1f} kg CO2 (baseline)",
+                    "co2_after_multiplier": f"{multiplied_co2:.1f} kg CO2 (after multiplier)"
+                })
+                
+            except Exception as green_error:
+                # Greenness analysis error, fall back to baseline but notify user
+                import traceback
+                logger.error(f"Greenness analysis failed: {green_error}")
+                logger.error(f"Greenness analysis traceback: {traceback.format_exc()}")
+                response["warnings"] = [f"Greenness analysis unavailable: {str(green_error)}"]
+                response["confidence_level"] = "Low Confidence (40.0%)"
+                response["greenness_error"] = str(green_error)  # Debug info
         
         else:
             # Only basic calculation available
@@ -854,7 +971,7 @@ async def estimate_carbon_credits(
         # Add estimation disclaimer
         response["disclaimer"] = "This is an estimate only. Final credits will be calculated during formal verification process."
         
-        return response
+        return clean(response)
         
     except HTTPException:
         raise
@@ -894,16 +1011,16 @@ async def perform_immediate_ai_analysis(project_id: int, before_image_data: byte
                     transformation_metrics = supporting_analysis.get('transformation_metrics', {})
                     co2_results = supporting_analysis.get('co2_sequestration', {})
                     
-                    # Update with analysis results including provisional credits
-                    current_evidence.calculated_co2_sequestration = co2_results.get('co2_sequestration_kg')
-                    current_evidence.vegetation_change_percentage = transformation_metrics.get('vegetation_change_percentage')
-                    current_evidence.ndvi_improvement = transformation_metrics.get('ndvi_improvement')
-                    current_evidence.land_transformation_score = transformation_metrics.get('transformation_score')
-                    current_evidence.calculated_carbon_credits = analysis_result.get('recommended_credits')
-                    current_evidence.credit_calculation_method = analysis_result.get('calculation_method', 'ai_analysis_immediate')
-                    current_evidence.ai_analysis_results = analysis_result
-                    current_evidence.confidence_score = analysis_result.get('verification_confidence')
-                    current_evidence.analysis_summary = analysis_result.get('calculation_summary')
+                    # Update with analysis results including provisional credits - convert numpy types
+                    current_evidence.calculated_co2_sequestration = convert_numpy_types(co2_results.get('co2_sequestration_kg'))
+                    current_evidence.vegetation_change_percentage = convert_numpy_types(transformation_metrics.get('vegetation_change_percentage'))
+                    current_evidence.ndvi_improvement = convert_numpy_types(transformation_metrics.get('ndvi_improvement'))
+                    current_evidence.land_transformation_score = convert_numpy_types(transformation_metrics.get('transformation_score'))
+                    current_evidence.calculated_carbon_credits = convert_numpy_types(analysis_result.get('recommended_credits'))
+                    current_evidence.credit_calculation_method = 'ai_analysis'
+                    current_evidence.ai_analysis_results = convert_numpy_types(analysis_result)
+                    current_evidence.confidence_score = convert_numpy_types(analysis_result.get('verification_confidence'))
+                    current_evidence.analysis_summary = convert_numpy_types(analysis_result.get('calculation_summary'))
                     
                     db.commit()
                     
@@ -1066,6 +1183,36 @@ def get_evidences_for_project(project_id: int):
             "verified": r.verified or False
         } for r in rows
     ])
+
+@app.get("/debug/evidence/{evidence_id}")
+def debug_evidence(evidence_id: int):
+    """
+    Debug endpoint to check evidence data in database.
+    """
+    db = SessionLocal()
+    try:
+        evidence = db.query(MRVData).filter(MRVData.id == evidence_id).first()
+        if not evidence:
+            raise HTTPException(status_code=404, detail="Evidence not found")
+        
+        return clean({
+            "evidence_id": evidence.id,
+            "project_id": evidence.project_id,
+            "evidence_type": evidence.evidence_type,
+            "calculated_carbon_credits": evidence.calculated_carbon_credits,
+            "credit_calculation_method": evidence.credit_calculation_method,
+            "confidence_score": evidence.confidence_score,
+            "calculated_co2_sequestration": evidence.calculated_co2_sequestration,
+            "vegetation_change_percentage": evidence.vegetation_change_percentage,
+            "ndvi_improvement": evidence.ndvi_improvement,
+            "land_transformation_score": evidence.land_transformation_score,
+            "analysis_summary": evidence.analysis_summary,
+            "ai_analysis_results": evidence.ai_analysis_results,
+            "verified": evidence.verified,
+            "timestamp": evidence.timestamp.isoformat() if evidence.timestamp else None
+        })
+    finally:
+        db.close()
 
 @app.post("/verify")
 def verify_project(req: VerifyRequest):
@@ -1242,6 +1389,69 @@ def mint_credits(req: MintRequest):
         "receipt": receipt,
         "balance": balance
     })
+
+@app.post("/reject")
+def reject_evidence(req: RejectRequest):
+    """
+    Reject and delete evidence from the system.
+    This removes the evidence from the database and marks it as rejected.
+    """
+    evidence_id = int(req.evidence_id)
+    
+    # Get evidence details from database
+    db = SessionLocal()
+    try:
+        evidence = db.query(MRVData).filter(MRVData.id == evidence_id).first()
+        if not evidence:
+            raise HTTPException(status_code=404, detail="Evidence not found")
+        
+        # Check if evidence is already verified
+        if evidence.verified:
+            raise HTTPException(status_code=400, detail="Cannot reject already verified evidence")
+        
+        # Store some info before deletion for response
+        project_id = evidence.project_id
+        uploader = evidence.uploader
+        evidence_type = evidence.evidence_type
+        
+        # Delete associated files if they exist
+        try:
+            if evidence.media_hashes and isinstance(evidence.media_hashes, dict):
+                files = evidence.media_hashes.get('files', [])
+                for filename in files:
+                    file_path = os.path.join("uploads", filename)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Deleted file: {file_path}")
+        except Exception as file_error:
+            logger.warning(f"Failed to delete some files: {file_error}")
+        
+        # Delete evidence from database
+        db.delete(evidence)
+        db.commit()
+        
+        logger.info(f"Evidence {evidence_id} rejected and deleted. Reason: {req.reason}")
+        
+        return clean({
+            "status": "rejected",
+            "evidence_id": evidence_id,
+            "project_id": project_id,
+            "uploader": uploader,
+            "evidence_type": evidence_type,
+            "reason": req.reason,
+            "message": "Evidence has been rejected and removed from the system"
+        })
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to reject evidence {evidence_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        db.close()
+
 @app.get("/projects/{project_id}")
 def get_project(project_id: int):
     try:

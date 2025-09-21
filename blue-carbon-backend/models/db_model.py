@@ -35,7 +35,28 @@ class MRVData(Base):
     calculated_carbon_credits = Column(Float)  # Dynamically calculated carbon credits
     credit_calculation_method = Column(String, default='ai_analysis')  # 'fixed', 'ai_analysis'
     
+    # Green Progress Analysis
+    green_progress_multiplier = Column(Float, default=1.0)  # Greenness-based multiplier (0-1.5)
+    green_progress_level = Column(String)  # 'Exceptional', 'Significant', 'Good', etc.
+    before_green_percentage = Column(Float)  # % of green pixels in before image
+    after_green_percentage = Column(Float)   # % of green pixels in after image
+    green_improvement = Column(Float)        # Difference in green percentage
+    
     # AI Analysis Metadata
     ai_analysis_results = Column(JSON)  # Complete AI analysis results
     confidence_score = Column(Float)  # AI analysis confidence score
     analysis_summary = Column(Text)  # Human-readable analysis summary
+
+class ProjectData(Base):
+    __tablename__ = "projects"
+    id = Column(Integer, primary_key=True, index=True)
+    blockchain_id = Column(Integer, index=True)  # ID from blockchain
+    name = Column(String, index=True)
+    location = Column(String)
+    hectares = Column(Integer)
+    owner = Column(String, index=True)  # Wallet address
+    project_metadata = Column(String)  # Renamed from 'metadata' to avoid SQLAlchemy conflict
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    tx_hash = Column(String)  # Blockchain transaction hash
+    verified_on_blockchain = Column(Boolean, default=False)
+    total_issued_credits = Column(Float, default=0.0)

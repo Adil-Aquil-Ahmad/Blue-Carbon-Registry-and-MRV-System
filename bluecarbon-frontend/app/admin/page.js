@@ -74,7 +74,8 @@ function AdminPage() {
 
   async function handleVerify(evidenceId, projectId, owner) {
     try {
-      await verifyProject(evidenceId, { mint_receipt: true, mint_amount: 100 })
+      // Don't specify mint_amount - let backend use AI-calculated credits
+      await verifyProject(evidenceId, { mint_receipt: true })
 
       // refresh after successful verification
       await loadData()
@@ -87,6 +88,35 @@ function AdminPage() {
     } catch (err) {
       console.error(err)
       alert('❌ Verification failed: ' + err.message)
+    }
+  }
+
+  async function handleReject(evidenceId, projectId) {
+    const reason = prompt('Please provide a reason for rejecting this evidence:')
+    if (!reason) return
+
+    try {
+      const response = await fetch(`http://localhost:8000/reject`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          evidence_id: evidenceId,
+          reason: reason
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to reject evidence')
+      }
+
+      // refresh after successful rejection
+      await loadData()
+      alert('✅ Evidence rejected and removed')
+    } catch (err) {
+      console.error(err)
+      alert('❌ Rejection failed: ' + err.message)
     }
   }
 
@@ -391,23 +421,42 @@ function AdminPage() {
                                       Uploader: {evidence.uploader} • GPS: {evidence.gps} • CO2: {evidence.co2}
                                     </p>
                                   </div>
-                                  <button
-                                    onClick={() => handleVerify(evidence.evidenceId, project.id, project.owner)}
-                                    style={{
-                                      padding: '8px 16px',
-                                      background: 'linear-gradient(135deg, #10b981, #059669)',
-                                      color: 'white',
-                                      border: 'none',
-                                      borderRadius: '8px',
-                                      fontSize: '14px',
-                                      fontWeight: '600',
-                                      cursor: 'pointer',
-                                      boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)',
-                                      transition: 'all 0.2s ease'
-                                    }}
-                                  >
-                                    Verify & Mint
-                                  </button>
+                                  <div style={{ display: 'flex', gap: '8px' }}>
+                                    <button
+                                      onClick={() => handleVerify(evidence.evidenceId, project.id, project.owner)}
+                                      style={{
+                                        padding: '8px 16px',
+                                        background: 'linear-gradient(135deg, #10b981, #059669)',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        fontSize: '14px',
+                                        fontWeight: '600',
+                                        cursor: 'pointer',
+                                        boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)',
+                                        transition: 'all 0.2s ease'
+                                      }}
+                                    >
+                                      Verify & Mint
+                                    </button>
+                                    <button
+                                      onClick={() => handleReject(evidence.evidenceId, project.id)}
+                                      style={{
+                                        padding: '8px 16px',
+                                        background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '8px',
+                                        fontSize: '14px',
+                                        fontWeight: '600',
+                                        cursor: 'pointer',
+                                        boxShadow: '0 4px 15px rgba(239, 68, 68, 0.3)',
+                                        transition: 'all 0.2s ease'
+                                      }}
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
                                 </div>
                               ))}
                             </div>

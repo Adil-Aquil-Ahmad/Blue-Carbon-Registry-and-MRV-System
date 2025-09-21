@@ -414,15 +414,27 @@ class BeforeAfterAnalyzer:
             # Calculate transformation metrics
             transformation_metrics = self._calculate_detailed_transformation(before_analysis, after_analysis)
             
+            # Calculate vegetation change multiplier
+            multiplier_result = self.calculate_vegetation_change_multiplier(before_analysis, after_analysis)
+            
             # Calculate CO2 sequestration
             co2_results = self.co2_calculator.calculate_co2_sequestration(
                 before_analysis, after_analysis, project_area_hectares, time_period_years
             )
             
-            # Calculate carbon credits
+            # Apply vegetation change multiplier to CO2 results
+            original_co2 = co2_results['co2_sequestration_kg']
+            multiplied_co2 = original_co2 * multiplier_result['vegetation_change_multiplier']
+            co2_results['co2_sequestration_kg'] = multiplied_co2
+            co2_results['original_co2_before_multiplier'] = original_co2
+            co2_results['vegetation_change_multiplier_applied'] = multiplier_result['vegetation_change_multiplier']
+            
+            # Calculate carbon credits based on adjusted CO2
             credit_results = self.co2_calculator.calculate_carbon_credits(
                 co2_results['co2_sequestration_kg']
             )
+            credit_results['original_credits_before_multiplier'] = self.co2_calculator.calculate_carbon_credits(original_co2)['carbon_credits']
+            credit_results['vegetation_change_multiplier_applied'] = multiplier_result['vegetation_change_multiplier']
             
             # Generate comprehensive analysis report
             analysis_report = self._generate_comparison_report(
@@ -447,7 +459,10 @@ class BeforeAfterAnalyzer:
                 # Transformation analysis
                 'transformation_metrics': transformation_metrics,
                 
-                # CO2 and carbon credit calculations
+                # Vegetation change multiplier
+                'vegetation_change_multiplier': multiplier_result,
+                
+                # CO2 and carbon credit calculations (with multiplier applied)
                 'co2_sequestration': co2_results,
                 'carbon_credits': credit_results,
                 
@@ -718,6 +733,158 @@ class BeforeAfterAnalyzer:
             return 'require_additional_evidence'
         else:
             return 'require_manual_review'
+    
+    def calculate_vegetation_change_multiplier(self, before_analysis: Dict, after_analysis: Dict) -> Dict:
+        """
+        Calculate vegetation change multiplier (0 to 1.5) based on before/after image comparison.
+        
+        Returns:
+        - 0.0: No improvement or worse (barren land remains barren)
+        - 0.1-0.5: Minimal improvement
+        - 0.6-1.0: Moderate improvement  
+        - 1.1-1.5: Significant improvement (much more green than before)
+        
+        Also returns accuracy percentage for confidence display.
+        """
+        try:
+            # Extract vegetation metrics from both analyses
+            before_veg = before_analysis.get('vegetation_analysis', {})
+            after_veg = after_analysis.get('vegetation_analysis', {})
+            before_ndvi = before_analysis.get('ndvi_analysis', {})
+            after_ndvi = after_analysis.get('ndvi_analysis', {})
+            
+            # Calculate vegetation coverage change
+            before_total_veg = before_veg.get('total_vegetation_coverage', 0)
+            after_total_veg = after_veg.get('total_vegetation_coverage', 0)
+            veg_change_percentage = after_total_veg - before_total_veg
+            
+            # Calculate NDVI improvement  
+            before_mean_ndvi = before_ndvi.get('mean_ndvi', 0)
+            after_mean_ndvi = after_ndvi.get('mean_ndvi', 0)
+            ndvi_improvement = after_mean_ndvi - before_mean_ndvi
+            
+            # Calculate healthy vegetation change
+            before_healthy = before_veg.get('healthy_vegetation', 0)
+            after_healthy = after_veg.get('healthy_vegetation', 0)
+            healthy_veg_change = after_healthy - before_healthy
+            
+            # Calculate bare land reduction
+            before_bare = before_veg.get('bare_land', 0)
+            after_bare = after_veg.get('bare_land', 0)
+            bare_land_reduction = before_bare - after_bare
+            
+            # Base multiplier calculation
+            multiplier = 1.0  # Start with neutral
+            
+            # Primary factor: Overall vegetation change
+            if veg_change_percentage > 40:  # Massive improvement
+                multiplier = 1.5
+            elif veg_change_percentage > 25:  # Significant improvement
+                multiplier = 1.3
+            elif veg_change_percentage > 15:  # Good improvement
+                multiplier = 1.2
+            elif veg_change_percentage > 5:   # Moderate improvement
+                multiplier = 1.1
+            elif veg_change_percentage > -5:  # Minimal/no change
+                multiplier = 1.0
+            elif veg_change_percentage > -15: # Some degradation
+                multiplier = 0.6
+            elif veg_change_percentage > -25: # Significant degradation
+                multiplier = 0.4
+            else:  # Severe degradation
+                multiplier = 0.1
+            
+            # NDVI adjustment factor
+            if ndvi_improvement > 0.3:  # Excellent NDVI improvement
+                multiplier *= 1.1
+            elif ndvi_improvement > 0.2:  # Good NDVI improvement
+                multiplier *= 1.05
+            elif ndvi_improvement < -0.2:  # NDVI degradation
+                multiplier *= 0.8
+            elif ndvi_improvement < -0.3:  # Severe NDVI degradation
+                multiplier *= 0.6
+            
+            # Healthy vegetation bonus
+            if healthy_veg_change > 20:  # Significant healthy vegetation increase
+                multiplier *= 1.1
+            elif healthy_veg_change < -20:  # Significant healthy vegetation loss
+                multiplier *= 0.8
+            
+            # Bare land restoration bonus
+            if bare_land_reduction > 20:  # Significant bare land restoration
+                multiplier *= 1.1
+            elif bare_land_reduction < -20:  # Increased bare land
+                multiplier *= 0.7
+            
+            # Special case: If no improvement at all (same barren land)
+            if (before_total_veg < 10 and after_total_veg < 10 and 
+                abs(veg_change_percentage) < 3 and abs(ndvi_improvement) < 0.05):
+                multiplier = 0.0
+            
+            # Ensure multiplier stays within bounds (0 to 1.5)
+            multiplier = max(0.0, min(1.5, multiplier))
+            
+            # Calculate accuracy percentage based on image quality and analysis confidence
+            before_confidence = before_analysis.get('verification_metrics', {}).get('confidence_score', 70)
+            after_confidence = after_analysis.get('verification_metrics', {}).get('confidence_score', 70)
+            base_accuracy = (before_confidence + after_confidence) / 2
+            
+            # Adjust accuracy based on change magnitude (larger changes are easier to detect)
+            change_magnitude = abs(veg_change_percentage)
+            if change_magnitude > 30:
+                accuracy = min(95, base_accuracy + 10)  # High confidence for large changes
+            elif change_magnitude > 15:
+                accuracy = min(90, base_accuracy + 5)   # Good confidence for moderate changes
+            elif change_magnitude > 5:
+                accuracy = base_accuracy  # Normal confidence for small changes
+            else:
+                accuracy = max(60, base_accuracy - 10)  # Lower confidence for minimal changes
+            
+            # Special case adjustment for barren land detection
+            if multiplier == 0.0:
+                accuracy = min(85, accuracy)  # Good confidence in detecting no change
+            
+            return {
+                'vegetation_change_multiplier': round(multiplier, 3),
+                'accuracy_percentage': round(accuracy, 1),
+                'analysis_details': {
+                    'vegetation_change_percentage': round(veg_change_percentage, 2),
+                    'ndvi_improvement': round(ndvi_improvement, 3),
+                    'healthy_vegetation_change': round(healthy_veg_change, 2),
+                    'bare_land_reduction': round(bare_land_reduction, 2),
+                    'before_total_vegetation': round(before_total_veg, 2),
+                    'after_total_vegetation': round(after_total_veg, 2),
+                    'change_magnitude': round(change_magnitude, 2),
+                    'multiplier_justification': self._get_multiplier_justification(multiplier, veg_change_percentage)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating vegetation change multiplier: {str(e)}")
+            return {
+                'vegetation_change_multiplier': 1.0,  # Neutral fallback
+                'accuracy_percentage': 50.0,  # Low confidence fallback
+                'analysis_details': {
+                    'error': str(e)
+                }
+            }
+    
+    def _get_multiplier_justification(self, multiplier: float, veg_change: float) -> str:
+        """Get human-readable justification for the multiplier value."""
+        if multiplier >= 1.4:
+            return f"Exceptional vegetation improvement ({veg_change:+.1f}%) - Maximum credit multiplier"
+        elif multiplier >= 1.2:
+            return f"Significant vegetation improvement ({veg_change:+.1f}%) - High credit multiplier"
+        elif multiplier >= 1.05:
+            return f"Good vegetation improvement ({veg_change:+.1f}%) - Moderate credit multiplier"
+        elif multiplier >= 0.95:
+            return f"Stable vegetation ({veg_change:+.1f}%) - Standard credit calculation"
+        elif multiplier >= 0.5:
+            return f"Some vegetation loss ({veg_change:+.1f}%) - Reduced credit multiplier"
+        elif multiplier >= 0.1:
+            return f"Significant vegetation loss ({veg_change:+.1f}%) - Low credit multiplier"
+        else:
+            return f"No improvement or severe degradation ({veg_change:+.1f}%) - No credits awarded"
     
     def _generate_comparison_report(self, before_analysis: Dict, after_analysis: Dict,
                                   transformation: Dict, co2_results: Dict, 

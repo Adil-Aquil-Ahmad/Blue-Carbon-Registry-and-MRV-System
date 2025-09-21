@@ -918,12 +918,11 @@ export default function UploadPage() {
                         <div style={{
                           fontSize: '16px',
                           fontWeight: '700',
-                          color: estimation.confidence_level === 'high' ? '#059669' : 
-                                estimation.confidence_level === 'medium' ? '#d97706' : '#dc2626',
-                          marginBottom: '5px',
-                          textTransform: 'capitalize'
+                          color: estimation.confidence_level?.includes('High') ? '#059669' : 
+                                estimation.confidence_level?.includes('Medium') ? '#d97706' : '#dc2626',
+                          marginBottom: '5px'
                         }}>
-                          {estimation.confidence_level}
+                          {estimation.confidence_level || 'Medium Confidence'}
                         </div>
                         <div style={{
                           fontSize: '14px',
@@ -933,6 +932,34 @@ export default function UploadPage() {
                           Confidence
                         </div>
                       </div>
+
+                      {/* Green Progress Multiplier Card */}
+                      {estimation.green_progress_multiplier && (
+                        <div style={{
+                          textAlign: 'center',
+                          padding: '15px',
+                          backgroundColor: 'white',
+                          borderRadius: '12px',
+                          border: '1px solid #e2e8f0'
+                        }}>
+                          <div style={{
+                            fontSize: '20px',
+                            fontWeight: '700',
+                            color: estimation.green_progress_multiplier >= 1.3 ? '#059669' :
+                                  estimation.green_progress_multiplier >= 1.0 ? '#d97706' : '#dc2626',
+                            marginBottom: '5px'
+                          }}>
+                            {estimation.green_progress_multiplier.toFixed(2)}x
+                          </div>
+                          <div style={{
+                            fontSize: '14px',
+                            color: '#64748b',
+                            fontWeight: '600'
+                          }}>
+                            Green Progress
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div style={{
@@ -942,10 +969,48 @@ export default function UploadPage() {
                       fontStyle: 'italic'
                     }}>
                       Method: {estimation.calculation_method} • Type: {estimation.estimation_type}
-                      {estimation.ai_analysis && (
-                        <span> • AI Confidence: {(estimation.ai_analysis.confidence_score * 100).toFixed(0)}%</span>
+                      {estimation.greenness_analysis && (
+                        <>
+                          <span> • Green Progress: {estimation.green_progress_level}</span>
+                          <span> • Vegetation Change: {estimation.greenness_analysis.green_improvement}%</span>
+                        </>
                       )}
                     </div>
+
+                    {/* Detailed Greenness Analysis Information */}
+                    {estimation.greenness_analysis && estimation.greenness_analysis.multiplier_justification && (
+                      <div style={{
+                        marginTop: '15px',
+                        padding: '12px',
+                        backgroundColor: '#f0f9ff',
+                        border: '1px solid #0ea5e9',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        color: '#0369a1'
+                      }}>
+                        🌱 <strong>Green Progress Analysis:</strong> {estimation.greenness_analysis.multiplier_justification}
+                      </div>
+                    )}
+
+                    {/* Breakdown Information */}
+                    {estimation.breakdown && Object.keys(estimation.breakdown).length > 0 && (
+                      <div style={{
+                        marginTop: '15px',
+                        padding: '12px',
+                        backgroundColor: '#f8fafc',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        color: '#475569'
+                      }}>
+                        <div style={{ fontWeight: '600', marginBottom: '8px' }}>📊 Calculation Breakdown:</div>
+                        {Object.entries(estimation.breakdown).map(([key, value]) => (
+                          <div key={key} style={{ marginBottom: '4px' }}>
+                            <strong>{key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}:</strong> {value}
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
                     {estimation.disclaimer && (
                       <div style={{
