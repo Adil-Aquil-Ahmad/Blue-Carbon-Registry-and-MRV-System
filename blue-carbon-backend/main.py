@@ -1869,6 +1869,110 @@ def get_ai_verification_stats():
     finally:
         db.close()
 
+# Evidence Details and Image Comparison Endpoints
+
+@app.get("/evidence/{evidence_id}/detailed-view")
+def get_evidence_detailed_view(evidence_id: int):
+    """
+    Get comprehensive evidence details including project info and image comparison analysis.
+    This endpoint is used by the View button in the admin verification interface.
+    """
+    from services.evidence_image_comparator import EvidenceImageComparator
+    
+    db = SessionLocal()
+    try:
+        # Get evidence details
+        evidence = db.query(MRVData).filter(MRVData.id == evidence_id).first()
+        if not evidence:
+            raise HTTPException(status_code=404, detail="Evidence not found")
+        
+        # Get project details
+        project = db.query(ProjectData).filter(ProjectData.id == evidence.project_id).first()
+        if not project:
+            project_info = {"name": "Unknown Project", "owner": "Unknown", "description": "No project details available"}
+        else:
+            project_info = {
+                "name": project.name,
+                "owner": project.owner,
+                "description": project.project_metadata or "No description available",  # Use project_metadata as description
+                "location": project.location or "Not specified",
+                "area_hectares": project.hectares or 0,
+                "start_date": project.created_at.isoformat() if project.created_at else None
+            }
+        
+        # Basic evidence details
+        evidence_details = {
+            "evidence_id": evidence.id,
+            "project_id": evidence.project_id,
+            "uploader": evidence.uploader,
+            "gps": evidence.gps,
+            "timestamp": evidence.timestamp.isoformat() if evidence.timestamp else None,
+            "evidence_type": evidence.evidence_type,
+            "verified": evidence.verified or False,
+            "calculated_carbon_credits": evidence.calculated_carbon_credits,
+            "calculated_co2_sequestration": evidence.calculated_co2_sequestration,
+            "vegetation_change_percentage": evidence.vegetation_change_percentage,
+            "ndvi_improvement": evidence.ndvi_improvement,
+            "land_transformation_score": evidence.land_transformation_score,
+            "confidence_score": evidence.confidence_score,
+            "credit_calculation_method": evidence.credit_calculation_method,
+            "analysis_summary": evidence.analysis_summary
+        }
+        
+        # Initialize image comparator
+        comparator = EvidenceImageComparator()
+        
+        # Get image comparison analysis
+        image_analysis = comparator.get_evidence_images_analysis(evidence_id)
+        
+        # Combine all information
+        result = {
+            "success": True,
+            "evidence": evidence_details,
+            "project": project_info,
+            "image_analysis": image_analysis,
+            "verification_status": {
+                "is_verified": evidence.verified or False,
+                "can_be_verified": image_analysis.get('success', False) and evidence.calculated_carbon_credits is not None,
+                "verification_recommendation": "Ready for verification" if (
+                    image_analysis.get('success', False) and 
+                    evidence.calculated_carbon_credits is not None and 
+                    image_analysis.get('vegetation_improvement_percentage', 0) > 0
+                ) else "Needs further review"
+            }
+        }
+        
+        return clean(result)
+        
+    except Exception as e:
+        logger.error(f"Error getting detailed view for evidence {evidence_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get evidence details: {str(e)}")
+    finally:
+        db.close()
+
+@app.get("/evidence/{evidence_id}/image-comparison")
+def get_evidence_image_comparison(evidence_id: int):
+    """
+    Get just the image comparison analysis for an evidence.
+    Returns highlighted before/after images with vegetation change analysis.
+    """
+    from services.evidence_image_comparator import EvidenceImageComparator
+    
+    try:
+        comparator = EvidenceImageComparator()
+        analysis = comparator.get_evidence_images_analysis(evidence_id)
+        
+        if not analysis.get('success', False):
+            raise HTTPException(status_code=404, detail=analysis.get('error', 'Image comparison failed'))
+        
+        return clean(analysis)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error comparing images for evidence {evidence_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Image comparison failed: {str(e)}")
+
 # Include AI Verification Router
 app.include_router(ai_router)
 
