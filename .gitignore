@@ -183,16 +183,15 @@ jspm_packages/
 # Database
 # ===============================
 
-# SQLite databases
-*.db
-*.sqlite
-*.sqlite3
-bluecarbon.db
-
-# Database backups
+# Database backups (but keep main database files)
 *.sql
 *.dump
 *.backup
+
+# Temporary database files
+*.db-journal
+*.db-wal
+*.db-shm
 
 # ===============================
 # Blockchain / Smart Contracts
@@ -405,17 +404,44 @@ tmp/
 # Project Specific
 # ===============================
 
-# Project specific database
-bluecarbon.db*
+# Test files (all test scripts)
+test_*.py
+test_*.js
+test_*.ts
+**/test_*.py
+**/test_*.js
+**/test_*.ts
+
+# Debug files
+debug_*.py
+debug_*.js
+debug_*.txt
+debug_*.log
 
 # Test output files
 test_*.png
 test_*.jpg
-debug_*.txt
+test_*.gif
+test_*.mp4
+
+# Development/debugging scripts
+check_*.py
+verify_*.py
+analyze_*.py
+reset_*.py
+sync_*.py
+fix_*.py
+map_*.py
+add_*.py
+update_*.py
 
 # Local configuration
 config.local.py
 config.local.js
+
+# System startup scripts (can be regenerated)
+start-system.bat
+startup.sh
 
 # Deployment scripts
 deploy.sh
@@ -424,6 +450,21 @@ deploy.bat
 # Docker
 Dockerfile.local
 docker-compose.override.yml
+
+# Migration scripts (temporary)
+migrate_*.py
+migration_*.sql
+
+# Backup files
+*.bak
+*.backup
+backup_*
+restore_*
+
+# Development utilities
+utils_dev.py
+dev_tools.py
+temp_*.py
 
 # ===============================
 # Keep Important Files

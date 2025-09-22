@@ -381,22 +381,19 @@ def get_my_projects(current_user: Optional[User] = Depends(get_current_user_opti
     if current_user is None:
         return clean([])
     
-    # If user doesn't have a wallet address, return empty array
-    if not hasattr(current_user, 'wallet_address') or not current_user.wallet_address:
-        return clean([])
-    
     try:
         db = SessionLocal()
-        # Get projects from database for immediate availability
+        
+        # Query projects by username instead of wallet address
         user_projects = db.query(ProjectData).filter(
-            ProjectData.owner == current_user.wallet_address
+            ProjectData.username == current_user.username
         ).all()
         
         projects = []
         for project in user_projects:
             # Get evidence for this project
             evidences_query = db.query(MRVData).filter(
-                MRVData.project_id == (project.blockchain_id or project.id)
+                MRVData.project_id == project.id
             ).all()
             
             evidences = [
@@ -416,11 +413,12 @@ def get_my_projects(current_user: Optional[User] = Depends(get_current_user_opti
             ]
             
             projects.append({
-                "id": project.blockchain_id or project.id,
+                "id": project.id,  # Use database ID consistently
                 "name": project.name,
                 "location": project.location,
                 "hectares": project.hectares,
                 "owner": project.owner,
+                "username": project.username,  # Include username in response
                 "metadata": project.project_metadata,
                 "exists": True,
                 "totalIssuedCredits": project.total_issued_credits,
@@ -532,11 +530,12 @@ def get_projects():
             ]
 
             projects.append({
-                "id": project.blockchain_id or project.id,
+                "id": project.id,  # Use database ID, not blockchain_id
                 "name": project.name,
                 "location": project.location,
                 "hectares": project.hectares,
                 "owner": project.owner,
+                "username": project.username,  # Include username in response
                 "metadata": project.project_metadata,
                 "exists": True,
                 "totalIssuedCredits": project.total_issued_credits,
@@ -551,18 +550,19 @@ def get_projects():
         raise HTTPException(status_code=500, detail=f"Failed to fetch projects: {e}")
 
 @app.post("/projects")
-def register_project(project: Project):
+def register_project(project: Project, current_user: User = Depends(get_current_user)):
     owner_checksum = to_checksum(project.owner)
     
     # First save to database for immediate availability
     db = SessionLocal()
     try:
-        # Create project record in database
+        # Create project record in database with username
         project_record = ProjectData(
             name=project.name,
             location=project.location,
             hectares=project.hectares,
             owner=owner_checksum,
+            username=current_user.username,  # Store the logged-in user's username
             project_metadata=project.metadata,
             verified_on_blockchain=False  # Will update after blockchain confirmation
         )
@@ -593,12 +593,26 @@ def register_project(project: Project):
             
             # Try to get blockchain project ID from events
             try:
-                project_events = registry.events.ProjectRegistered().processReceipt(receipt)
+                # Look for ProjectRegistered events in the receipt
+                project_events = registry.events.ProjectRegistered().process_receipt(receipt)
                 if project_events:
-                    blockchain_project_id = project_events[0]["args"]["projectId"]
+                    blockchain_project_id = int(project_events[0]["args"]["projectId"])
                     project_record.blockchain_id = blockchain_project_id
+                    logger.info(f"Project registered on blockchain with ID: {blockchain_project_id}")
+                else:
+                    # If no events found, try to get the total projects count
+                    total_projects = registry.functions.totalProjects().call()
+                    project_record.blockchain_id = total_projects
+                    logger.info(f"Using total projects count as blockchain ID: {total_projects}")
             except Exception as e:
                 logger.warning(f"Could not extract project ID from blockchain events: {e}")
+                # Fallback: use total projects count
+                try:
+                    total_projects = registry.functions.totalProjects().call()
+                    project_record.blockchain_id = total_projects
+                    logger.info(f"Fallback: using total projects count as blockchain ID: {total_projects}")
+                except Exception as fallback_error:
+                    logger.error(f"Failed to get blockchain project ID: {fallback_error}")
             
             db.commit()
             
@@ -726,8 +740,24 @@ async def upload_evidence(
         "files": [os.path.basename(p) for p in saved_files]
     })
 
-    # Blockchain transaction
-    tx = registry.functions.uploadEvidence(project_id, evidence_hash_bytes, metadata).build_transaction({
+    # Get the blockchain project ID for the evidence upload
+    db_check = SessionLocal()
+    try:
+        project_record = db_check.query(ProjectData).filter(ProjectData.id == project_id).first()
+        if not project_record:
+            raise HTTPException(status_code=404, detail="Project not found in database")
+        
+        blockchain_project_id = project_record.blockchain_id
+        if blockchain_project_id is None:
+            raise HTTPException(status_code=400, detail="Project not registered on blockchain. Please re-register the project.")
+        
+    except Exception as db_error:
+        raise HTTPException(status_code=500, detail=f"Database error: {db_error}")
+    finally:
+        db_check.close()
+
+    # Blockchain transaction using blockchain project ID
+    tx = registry.functions.uploadEvidence(blockchain_project_id, evidence_hash_bytes, metadata).build_transaction({
         "from": OWNER,
         "nonce": w3.eth.get_transaction_count(OWNER),
         "gas": 2_000_000,
@@ -738,7 +768,7 @@ async def upload_evidence(
     # Get evidence_id
     evidence_id = None
     try:
-        events = registry.events.EvidenceUploaded().processReceipt(receipt)
+        events = registry.events.EvidenceUploaded().process_receipt(receipt)
         if events: 
             evidence_id = int(events[0]["args"]["evidenceId"])
     except Exception:
@@ -1011,22 +1041,77 @@ async def perform_immediate_ai_analysis(project_id: int, before_image_data: byte
                     transformation_metrics = supporting_analysis.get('transformation_metrics', {})
                     co2_results = supporting_analysis.get('co2_sequestration', {})
                     
-                    # Update with analysis results including provisional credits - convert numpy types
-                    current_evidence.calculated_co2_sequestration = convert_numpy_types(co2_results.get('co2_sequestration_kg'))
-                    current_evidence.vegetation_change_percentage = convert_numpy_types(transformation_metrics.get('vegetation_change_percentage'))
-                    current_evidence.ndvi_improvement = convert_numpy_types(transformation_metrics.get('ndvi_improvement'))
-                    current_evidence.land_transformation_score = convert_numpy_types(transformation_metrics.get('transformation_score'))
-                    current_evidence.calculated_carbon_credits = convert_numpy_types(analysis_result.get('recommended_credits'))
-                    current_evidence.credit_calculation_method = 'ai_analysis'
+                    # Use upload page calculation logic instead of complex AI analysis
+                    from services.co2_sequestration_calculator import CO2SequestrationCalculator
+                    from services.greenness_analyzer import GreennessAnalyzer
+                    
+                    co2_calculator = CO2SequestrationCalculator()
+                    
+                    # Get ecosystem type (default to mangrove)
+                    ecosystem_type = "mangrove"  # Could be made configurable
+                    
+                    # Calculate base credits using upload page logic
+                    baseline_co2 = co2_calculator.calculate_basic_co2_sequestration(
+                        ecosystem_type=ecosystem_type,
+                        area_hectares=project_area_hectares,
+                        time_period_years=1.0,
+                        transformation_factor=1.0
+                    )
+                    baseline_credits = baseline_co2 * project_area_hectares * 0.001
+                    
+                    # Try to get greenness multiplier from the AI analysis
+                    green_multiplier = 1.0
+                    confidence_score = 60.0
+                    
+                    if 'supporting_analysis' in analysis_result:
+                        supporting_analysis = analysis_result.get('supporting_analysis', {})
+                        transformation_metrics = supporting_analysis.get('transformation_metrics', {})
+                        
+                        # Get vegetation coverage values for more accurate calculation
+                        before_vegetation = transformation_metrics.get('before_vegetation_coverage', 0)
+                        after_vegetation = transformation_metrics.get('after_vegetation_coverage', 0)
+                        
+                        # Calculate realistic vegetation improvement
+                        if before_vegetation >= 0 and after_vegetation >= 0:
+                            # Use absolute improvement for low starting values
+                            if before_vegetation < 5:  # If starting vegetation is very low
+                                # Use absolute improvement: 10% vegetation = 1.1x multiplier
+                                vegetation_improvement = after_vegetation  # Absolute percentage
+                            else:
+                                # Use relative improvement for higher starting values
+                                vegetation_improvement = ((after_vegetation - before_vegetation) / before_vegetation) * 100
+                            
+                            # Convert to reasonable multiplier (cap at reasonable values)
+                            if vegetation_improvement > 0:
+                                # 10% improvement = 1.1x, 20% = 1.2x, etc.
+                                green_multiplier = 1.0 + min(vegetation_improvement / 100.0, 0.5)  # Cap at 1.5x
+                        
+                        confidence_score = analysis_result.get('verification_confidence', 60.0)
+                    
+                    # Calculate final credits using upload page formula
+                    final_credits = baseline_credits * green_multiplier
+                    
+                    # Update with upload page calculation results - convert numpy types
+                    current_evidence.calculated_co2_sequestration = convert_numpy_types(baseline_co2 * green_multiplier)
+                    current_evidence.vegetation_change_percentage = convert_numpy_types(min((green_multiplier - 1.0) * 100, 50))  # Store realistic percentage
+                    current_evidence.ndvi_improvement = convert_numpy_types(transformation_metrics.get('ndvi_improvement', 0))
+                    current_evidence.land_transformation_score = convert_numpy_types(transformation_metrics.get('transformation_score', 0))
+                    current_evidence.calculated_carbon_credits = convert_numpy_types(final_credits)
+                    current_evidence.green_progress_multiplier = convert_numpy_types(green_multiplier)
+                    current_evidence.credit_calculation_method = 'upload_page_calculation'
                     current_evidence.ai_analysis_results = convert_numpy_types(analysis_result)
-                    current_evidence.confidence_score = convert_numpy_types(analysis_result.get('verification_confidence'))
-                    current_evidence.analysis_summary = convert_numpy_types(analysis_result.get('calculation_summary'))
+                    current_evidence.confidence_score = convert_numpy_types(confidence_score)
+                    current_evidence.analysis_summary = f"Upload page calculation: {baseline_credits:.1f} base credits × {green_multiplier:.2f} multiplier = {final_credits:.1f} credits"
                     
                     db.commit()
                     
-                provisional_credits = analysis_result.get('provisional_credits', 0)
-                deferred_credits = analysis_result.get('deferred_credits', 0)
-                logger.info(f"Immediate AI analysis completed for project {project_id}. Total: {analysis_result.get('recommended_credits')} credits (Provisional: {provisional_credits}, Deferred: {deferred_credits})")
+                provisional_credits = final_credits  # Use our calculation instead
+                deferred_credits = 0  # No deferred credits in upload page calculation
+                logger.info(f"Upload page calculation completed for project {project_id}. Credits: {final_credits:.1f} (Base: {baseline_credits:.1f} × Multiplier: {green_multiplier:.2f})")
+                
+                # Return modified analysis result
+                analysis_result['recommended_credits'] = final_credits
+                analysis_result['calculation_method'] = 'upload_page_calculation'
                 return analysis_result
                 
             except Exception as db_error:
@@ -1236,12 +1321,12 @@ def verify_project(req: VerifyRequest):
         
         # Check if AI-calculated credits are available
         if (evidence.calculated_carbon_credits is not None and 
-            evidence.credit_calculation_method == 'ai_analysis' and
+            evidence.credit_calculation_method in ['ai_analysis', 'upload_page_calculation'] and
             evidence.confidence_score is not None):
             
             # Use AI-calculated credits
             credits_to_mint = int(evidence.calculated_carbon_credits)
-            calculation_method = "ai_analysis"
+            calculation_method = evidence.credit_calculation_method
             analysis_report = evidence.analysis_summary
             
             logger.info(f"Using AI-calculated credits: {credits_to_mint} for evidence {evidence_id}")
@@ -1298,11 +1383,17 @@ def verify_project(req: VerifyRequest):
         evidence = db.query(MRVData).filter(MRVData.id == evidence_id).first()
         if evidence:
             evidence.verified = True
-            db.commit()
             
-            # Get updated project info
+            # Get updated project info from blockchain
             project_id = evidence.project_id
             project = registry.functions.projects(project_id).call()
+            
+            # Update local database project record with blockchain data
+            local_project = db.query(ProjectData).filter(ProjectData.id == project_id).first()
+            if local_project:
+                local_project.total_issued_credits = float(project[6])  # Update with blockchain total
+            
+            db.commit()
             
             # Prepare comprehensive verification result
             verification_result = {

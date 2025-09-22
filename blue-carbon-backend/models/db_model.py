@@ -55,6 +55,7 @@ class ProjectData(Base):
     location = Column(String)
     hectares = Column(Integer)
     owner = Column(String, index=True)  # Wallet address
+    username = Column(String, index=True)  # Username of the project creator
     project_metadata = Column(String)  # Renamed from 'metadata' to avoid SQLAlchemy conflict
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     tx_hash = Column(String)  # Blockchain transaction hash
